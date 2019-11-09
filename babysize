@@ -1,0 +1,109 @@
+#!/usr/bin/python3
+#	babysize - Compare infant/toddler sizes against WHO standards
+#	Copyright (C) 2019-2019 Johannes Bauer
+#
+#	This file is part of babysize.
+#
+#	babysize is free software; you can redistribute it and/or modify
+#	it under the terms of the GNU General Public License as published by
+#	the Free Software Foundation; this program is ONLY licensed under
+#	version 3 of the License, later versions are explicitly excluded.
+#
+#	babysize is distributed in the hope that it will be useful,
+#	but WITHOUT ANY WARRANTY; without even the implied warranty of
+#	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#	GNU General Public License for more details.
+#
+#	You should have received a copy of the GNU General Public License
+#	along with babysize; if not, write to the Free Software
+#	Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
+#	Johannes Bauer <JohannesBauer@gmx.de>
+
+import sys
+import json
+import datetime
+import bisect
+from FriendlyArgumentParser import FriendlyArgumentParser
+
+def parsedate(text):
+	return datetime.datetime.strptime(text, "%Y-%m-%d").date()
+
+def find_data(db, age_days):
+	min_index = 0
+	max_index = len(db) - 1
+	while min_index != max_index:
+		mid_index = (min_index + max_index) // 2
+		if db[mid_index]["day"] < age_days:
+			min_index = mid_index
+		elif db[mid_index]["day"] > age_days:
+			max_index = mid_index
+		else:
+			(min_index, max_index) = (mid_index, mid_index)
+
+	if db[min_index]["day"] == age_days:
+		return db[min_index]
+	else:
+		return None
+
+def percentile_estimate(thresholds, percentiles, value):
+	assert(len(thresholds) == len(percentiles))
+	if value <= percentiles[0]:
+		return "%.2f is below the %.1f%% percentile" % (value, thresholds[0])
+	elif value >= percentiles[-1]:
+		return "%.2f is above the %.1f%% percentile" % (value, thresholds[-1])
+
+	for (index, (top_threshold, top_percentile)) in enumerate(zip(thresholds, percentiles)):
+		if value < top_percentile:
+			btm_threshold = thresholds[index - 1]
+			btm_percentile = percentiles[index - 1]
+			assert(btm_percentile <= value <= top_percentile)
+
+			ratio = (value - btm_percentile) / (top_percentile - btm_percentile)
+			estimate_percentile = btm_threshold + (ratio * (top_threshold - btm_threshold))
+			return "Estimated %.1f%% percentile" % (estimate_percentile)
+
+parser = FriendlyArgumentParser(description = "Retrieve child growth data from WHO database.")
+parser.add_argument("-w", "--weight", metavar = "kilos", type = float, help = "Weight of child in kilograms.")
+parser.add_argument("-l", "--length", metavar = "cm", type = float, help = "Length/height of child in centimeters.")
+parser.add_argument("-c", "--head-circumference", metavar = "cm", type = float, help = "Head circumference of child in centimeters.")
+parser.add_argument("-d", "--database", metavar = "filename", type = str, default = "who_data.json", help = "Source data, defaults to %(default)s.")
+parser.add_argument("-v", "--verbose", action = "count", default = 0, help = "Increases verbosity. Can be specified multiple times to increase.")
+parser.add_argument("gender", choices = [ "m", "f" ], help = "Gender of the child, can be either %(choices)s.")
+parser.add_argument("birthday", metavar = "yyyy-mm-dd", type = parsedate, help = "Birthday of the child.")
+args = parser.parse_args(sys.argv[1:])
+
+
+age_days = (datetime.datetime.today().date() - args.birthday).days
+if args.verbose >= 1:
+	print("Child is %d days old or %.0f weeks / %.1f months." % (age_days, age_days / 7, age_days / 30.4375))
+
+with open(args.database) as f:
+	database = json.load(f)
+if args.verbose >= 2:
+	created_ts = datetime.datetime.strptime(database["meta"]["created_ts"], "%Y-%m-%dT%H:%M:%SZ")
+	print("Source data basis is from %s UTC." % (created_ts.strftime("%Y-%m-%d %H:%M")))
+
+gender_db = database[args.gender]
+for content_type in sorted(gender_db.keys()):
+	if "percentiles" in gender_db[content_type]:
+		percentile_db = gender_db[content_type]["percentiles"]
+		entry = find_data(percentile_db["data"], age_days)
+
+		if args.verbose >= 2:
+			print("%s / %s (%s)" % (percentile_db["desc"], percentile_db["content"], content_type))
+		else:
+			print("%s / %s" % (percentile_db["desc"], percentile_db["content"]))
+		print(" ".join("%6.1f%%" % (value) for value in percentile_db["percentiles"]))
+		print(" ".join("%7.1f" % (value) for value in entry["percentiles"]))
+		if (content_type == "wfa") and args.weight is not None:
+			print("  -> %s for a weight of %.1f kg" % (percentile_estimate(percentile_db["percentiles"], entry["percentiles"], args.weight), args.weight))
+		elif (content_type == "lhfa") and args.length is not None:
+			print("  -> %s for a length of %.0f cm" % (percentile_estimate(percentile_db["percentiles"], entry["percentiles"], args.length), args.length))
+		elif (content_type == "bfa") and (args.weight is not None) and (args.length is not None):
+			length_meters = args.length / 100
+			bmi = args.weight / (length_meters ** 2)
+			print("  -> %s for a BMI of %.1f" % (percentile_estimate(percentile_db["percentiles"], entry["percentiles"], bmi), bmi))
+		elif (content_type == "hcfa") and args.head_circumference is not None:
+			print("  -> %s for a head circumference of %.0f cm" % (percentile_estimate(percentile_db["percentiles"], entry["percentiles"], args.head_circumference), args.head_circumference))
+		print()
